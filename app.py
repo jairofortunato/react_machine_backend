@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from openai import OpenAI
 
@@ -244,6 +245,57 @@ async def profile_posts(req: ProfileRequest):
     has_more = page_info.get("has_next_page", False)
 
     return {"username": username, "posts": posts, "nextMaxId": next_max_id if has_more else None}
+
+
+class DownloadRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/download-video")
+async def download_video(req: DownloadRequest):
+    if not req.url.startswith("http"):
+        raise HTTPException(status_code=400, detail="Link inválido.")
+
+    tmp_dir = tempfile.mkdtemp(prefix="react-machine-dl-")
+    tmp = Path(tmp_dir)
+    output_template = str(tmp / "video.%(ext)s")
+
+    try:
+        subprocess.run(
+            [
+                "yt-dlp",
+                "--output", output_template,
+                "--no-playlist",
+                "--merge-output-format", "mp4",
+                req.url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao baixar o vídeo. {e.stderr[:200]}",
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Timeout ao baixar o vídeo.")
+
+    files = list(tmp.iterdir())
+    video_file = next(
+        (f for f in files if f.suffix.lower() in (".mp4", ".webm", ".mkv", ".mov")),
+        None,
+    )
+
+    if not video_file:
+        raise HTTPException(status_code=500, detail="Não foi possível baixar o vídeo.")
+
+    return FileResponse(
+        path=str(video_file),
+        media_type="video/mp4",
+        filename=video_file.name,
+    )
 
 
 @app.get("/health")
