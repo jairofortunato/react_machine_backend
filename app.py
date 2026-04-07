@@ -147,6 +147,12 @@ async def process_video(req: ProcessRequest):
                 )
             transcript = transcription.text
         except Exception as e:
+            err_str = str(e).lower()
+            if "quota" in err_str or "billing" in err_str or "rate" in err_str or "insufficient" in err_str:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Os créditos do serviço de transcrição acabaram. Entre em contato com o Jairo pelo WhatsApp (48) 99926-3038 para resolver.",
+                )
             raise HTTPException(status_code=500, detail=f"Erro na transcrição: {str(e)[:200]}")
 
         return {
@@ -181,6 +187,11 @@ async def profile_posts(req: ProfileRequest):
         except httpx.TimeoutException:
             raise HTTPException(status_code=500, detail="Timeout ao buscar perfil.")
 
+        if resp.status_code == 429 or resp.status_code == 403:
+            raise HTTPException(
+                status_code=500,
+                detail="Os créditos da busca de perfis acabaram. Entre em contato com o Jairo pelo WhatsApp (48) 99926-3038 para resolver.",
+            )
         if resp.status_code != 200:
             raise HTTPException(
                 status_code=500,
