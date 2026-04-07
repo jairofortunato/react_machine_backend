@@ -161,102 +161,81 @@ async def profile_posts(req: ProfileRequest):
     if not username:
         raise HTTPException(status_code=400, detail="Username é obrigatório.")
 
-    # Use yt-dlp to scrape individual post info from a profile
-    # First try the graphql approach via yt-dlp with cookies workaround
-    profile_url = f"https://www.instagram.com/{username}/reels/"
+    rapidapi_key = os.environ.get("RAPIDAPI_KEY")
+    if not rapidapi_key:
+        raise HTTPException(status_code=500, detail="RAPIDAPI_KEY não configurada.")
 
-    try:
-        result = subprocess.run(
-            [
-                "yt-dlp",
-                "--flat-playlist",
-                "--dump-json",
-                "--playlist-end",
-                str(req.max_posts),
-                "--extractor-args",
-                "instagram:compatible_formats=dash",
-                profile_url,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=500, detail="Timeout ao buscar perfil.")
+    async with httpx.AsyncClient(timeout=20) as http:
+        try:
+            resp = await http.post(
+                "https://instagram120.p.rapidapi.com/api/instagram/posts",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-rapidapi-key": rapidapi_key,
+                    "x-rapidapi-host": "instagram120.p.rapidapi.com",
+                },
+                json={"username": username, "maxId": ""},
+            )
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=500, detail="Timeout ao buscar perfil.")
 
-    # If yt-dlp fails, try scraping the page HTML for shortcodes
-    posts = []
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao buscar perfil (status {resp.status_code}).",
+            )
 
-    if result.stdout.strip():
-        for line in result.stdout.strip().split("\n"):
-            if not line.strip():
-                continue
-            try:
-                info = json.loads(line)
-                raw_date = info.get("upload_date")
-                post_id = info.get("id", "")
-                posts.append({
-                    "id": post_id,
-                    "url": info.get("url") or info.get("webpage_url") or f"https://www.instagram.com/reel/{post_id}/",
-                    "title": info.get("title", ""),
-                    "description": info.get("description", ""),
-                    "thumbnail": info.get("thumbnail") or (info.get("thumbnails", [{}]) or [{}])[-1].get("url"),
-                    "likes": info.get("like_count"),
-                    "comments": info.get("comment_count"),
-                    "views": info.get("view_count"),
-                    "date": (
-                        f"{raw_date[6:8]}/{raw_date[4:6]}/{raw_date[:4]}"
-                        if raw_date
-                        else None
-                    ),
-                })
-            except json.JSONDecodeError:
-                continue
+        try:
+            data = resp.json()
+        except Exception:
+            raise HTTPException(status_code=500, detail="Resposta inválida da API.")
 
-    # Fallback: scrape shortcodes from HTML page
-    if not posts:
-        import re
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as http:
-            try:
-                resp = await http.get(
-                    f"https://www.instagram.com/{username}/",
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-                    },
-                )
-                if resp.status_code == 200:
-                    # Extract shortcodes from the HTML
-                    shortcodes = re.findall(r'/reel/([A-Za-z0-9_-]+)/', resp.text)
-                    # Also try /p/ pattern
-                    shortcodes += re.findall(r'/p/([A-Za-z0-9_-]+)/', resp.text)
-                    # Deduplicate while preserving order
-                    seen = set()
-                    unique_codes = []
-                    for sc in shortcodes:
-                        if sc not in seen:
-                            seen.add(sc)
-                            unique_codes.append(sc)
-
-                    for sc in unique_codes[: req.max_posts]:
-                        posts.append({
-                            "id": sc,
-                            "url": f"https://www.instagram.com/reel/{sc}/",
-                            "title": "",
-                            "description": "",
-                            "thumbnail": None,
-                            "likes": None,
-                            "comments": None,
-                            "views": None,
-                            "date": None,
-                        })
-            except Exception:
-                pass
-
-    if not posts:
+    edges = data.get("result", {}).get("edges", [])
+    if not edges:
         raise HTTPException(
-            status_code=500,
-            detail="Não foi possível buscar posts. O perfil pode ser privado ou o Instagram bloqueou a requisição.",
+            status_code=404,
+            detail="Nenhum post encontrado. O perfil pode ser privado.",
         )
+
+    posts = []
+    for edge in edges:
+        node = edge.get("node", {})
+        # media_type: 1=photo, 2=video, 8=carousel
+        # Include videos (2) and carousels (8) that may contain videos
+        media_type = node.get("media_type")
+        is_video = media_type == 2 or node.get("video_versions") is not None
+
+        shortcode = node.get("code", "")
+        caption_data = node.get("caption") or {}
+        caption = caption_data.get("text", "") if isinstance(caption_data, dict) else ""
+        taken_at = node.get("taken_at")
+
+        date_str = None
+        if taken_at:
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(taken_at, tz=timezone.utc)
+            date_str = dt.strftime("%d/%m/%Y")
+
+        thumbnail = None
+        candidates = node.get("image_versions2", {}).get("candidates", [])
+        if candidates:
+            thumbnail = candidates[0].get("url")
+
+        posts.append({
+            "id": shortcode,
+            "url": f"https://www.instagram.com/reel/{shortcode}/" if is_video else f"https://www.instagram.com/p/{shortcode}/",
+            "title": "",
+            "description": caption,
+            "thumbnail": thumbnail,
+            "likes": node.get("like_count"),
+            "comments": node.get("comment_count"),
+            "views": node.get("video_view_count") if is_video else None,
+            "date": date_str,
+            "is_video": is_video,
+        })
+
+        if len(posts) >= req.max_posts:
+            break
 
     return {"username": username, "posts": posts}
 

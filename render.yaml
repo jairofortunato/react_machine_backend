@@ -6,3 +6,5 @@ services:
     envVars:
       - key: OPENAI_API_KEY
         sync: false
+      - key: RAPIDAPI_KEY
+        sync: false
