@@ -26,6 +26,11 @@ class ProcessRequest(BaseModel):
     instagram_url: str
 
 
+class ProfileRequest(BaseModel):
+    username: str
+    max_posts: int = 12
+
+
 @app.post("/api/process-video")
 async def process_video(req: ProcessRequest):
     if "instagram.com" not in req.instagram_url:
@@ -147,6 +152,65 @@ async def process_video(req: ProcessRequest):
             "thumbnailImage": thumbnail_base64,
             "videoStats": video_stats,
         }
+
+
+@app.post("/api/profile-posts")
+async def profile_posts(req: ProfileRequest):
+    username = req.username.strip().lstrip("@")
+    if not username:
+        raise HTTPException(status_code=400, detail="Username é obrigatório.")
+
+    profile_url = f"https://www.instagram.com/{username}/"
+
+    try:
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--flat-playlist",
+                "--dump-json",
+                "--playlist-end",
+                str(req.max_posts),
+                profile_url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Timeout ao buscar perfil.")
+
+    if result.returncode != 0 and not result.stdout.strip():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao buscar posts. Perfil pode ser privado ou não existir.",
+        )
+
+    posts = []
+    for line in result.stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            info = json.loads(line)
+            raw_date = info.get("upload_date")
+            posts.append({
+                "id": info.get("id"),
+                "url": info.get("url") or info.get("webpage_url") or f"https://www.instagram.com/reel/{info.get('id')}/",
+                "title": info.get("title", ""),
+                "description": info.get("description", ""),
+                "thumbnail": info.get("thumbnail") or info.get("thumbnails", [{}])[-1].get("url"),
+                "likes": info.get("like_count"),
+                "comments": info.get("comment_count"),
+                "views": info.get("view_count"),
+                "date": (
+                    f"{raw_date[6:8]}/{raw_date[4:6]}/{raw_date[:4]}"
+                    if raw_date
+                    else None
+                ),
+            })
+        except json.JSONDecodeError:
+            continue
+
+    return {"username": username, "posts": posts}
 
 
 @app.get("/health")
