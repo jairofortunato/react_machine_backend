@@ -35,8 +35,8 @@ class ProfileRequest(BaseModel):
 
 @app.post("/api/process-video")
 async def process_video(req: ProcessRequest):
-    if "instagram.com" not in req.instagram_url:
-        raise HTTPException(status_code=400, detail="Link inválido do Instagram.")
+    if not req.instagram_url.startswith("http"):
+        raise HTTPException(status_code=400, detail="Link inválido.")
 
     with tempfile.TemporaryDirectory(prefix="react-machine-") as tmp_dir:
         tmp = Path(tmp_dir)
