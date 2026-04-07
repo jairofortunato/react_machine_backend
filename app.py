@@ -3,6 +3,7 @@ import base64
 import json
 import subprocess
 import tempfile
+import httpx
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -160,55 +161,70 @@ async def profile_posts(req: ProfileRequest):
     if not username:
         raise HTTPException(status_code=400, detail="Username é obrigatório.")
 
-    profile_url = f"https://www.instagram.com/{username}/"
+    # Use Instagram's public web API to fetch profile posts
+    url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "X-IG-App-ID": "936619743392459",
+        "X-Requested-With": "XMLHttpRequest",
+    }
 
-    try:
-        result = subprocess.run(
-            [
-                "yt-dlp",
-                "--flat-playlist",
-                "--dump-json",
-                "--playlist-end",
-                str(req.max_posts),
-                profile_url,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=500, detail="Timeout ao buscar perfil.")
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client_http:
+        try:
+            resp = await client_http.get(url, headers=headers)
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=500, detail="Timeout ao buscar perfil.")
 
-    if result.returncode != 0 and not result.stdout.strip():
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro ao buscar posts. Perfil pode ser privado ou não existir.",
-        )
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Perfil não encontrado.")
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao buscar perfil (status {resp.status_code}).",
+            )
+
+        try:
+            data = resp.json()
+        except Exception:
+            raise HTTPException(status_code=500, detail="Resposta inválida do Instagram.")
+
+    user_data = data.get("data", {}).get("user")
+    if not user_data:
+        raise HTTPException(status_code=404, detail="Perfil não encontrado ou privado.")
+
+    edges = (
+        user_data.get("edge_owner_to_timeline_media", {}).get("edges", [])
+    )
 
     posts = []
-    for line in result.stdout.strip().split("\n"):
-        if not line.strip():
+    for edge in edges[: req.max_posts]:
+        node = edge.get("node", {})
+        # Only include video posts (reels/videos)
+        if not node.get("is_video", False):
             continue
-        try:
-            info = json.loads(line)
-            raw_date = info.get("upload_date")
-            posts.append({
-                "id": info.get("id"),
-                "url": info.get("url") or info.get("webpage_url") or f"https://www.instagram.com/reel/{info.get('id')}/",
-                "title": info.get("title", ""),
-                "description": info.get("description", ""),
-                "thumbnail": info.get("thumbnail") or info.get("thumbnails", [{}])[-1].get("url"),
-                "likes": info.get("like_count"),
-                "comments": info.get("comment_count"),
-                "views": info.get("view_count"),
-                "date": (
-                    f"{raw_date[6:8]}/{raw_date[4:6]}/{raw_date[:4]}"
-                    if raw_date
-                    else None
-                ),
-            })
-        except json.JSONDecodeError:
-            continue
+
+        shortcode = node.get("shortcode", "")
+        timestamp = node.get("taken_at_timestamp")
+        date_str = None
+        if timestamp:
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            date_str = dt.strftime("%d/%m/%Y")
+
+        caption_edges = node.get("edge_media_to_caption", {}).get("edges", [])
+        caption = caption_edges[0]["node"]["text"] if caption_edges else ""
+
+        posts.append({
+            "id": shortcode,
+            "url": f"https://www.instagram.com/reel/{shortcode}/",
+            "title": "",
+            "description": caption,
+            "thumbnail": node.get("thumbnail_src") or node.get("display_url"),
+            "likes": node.get("edge_media_preview_like", {}).get("count"),
+            "comments": node.get("edge_media_to_comment", {}).get("count"),
+            "views": node.get("video_view_count"),
+            "date": date_str,
+        })
 
     return {"username": username, "posts": posts}
 
