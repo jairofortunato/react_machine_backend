@@ -30,6 +30,7 @@ class ProcessRequest(BaseModel):
 class ProfileRequest(BaseModel):
     username: str
     max_posts: int = 12
+    max_id: str = ""
 
 
 @app.post("/api/process-video")
@@ -174,7 +175,7 @@ async def profile_posts(req: ProfileRequest):
                     "x-rapidapi-key": rapidapi_key,
                     "x-rapidapi-host": "instagram120.p.rapidapi.com",
                 },
-                json={"username": username, "maxId": ""},
+                json={"username": username, "maxId": req.max_id},
             )
         except httpx.TimeoutException:
             raise HTTPException(status_code=500, detail="Timeout ao buscar perfil.")
@@ -237,7 +238,12 @@ async def profile_posts(req: ProfileRequest):
         if len(posts) >= req.max_posts:
             break
 
-    return {"username": username, "posts": posts}
+    # Pagination cursor
+    page_info = data.get("result", {}).get("page_info", {})
+    next_max_id = page_info.get("end_cursor", "")
+    has_more = page_info.get("has_next_page", False)
+
+    return {"username": username, "posts": posts, "nextMaxId": next_max_id if has_more else None}
 
 
 @app.get("/health")
