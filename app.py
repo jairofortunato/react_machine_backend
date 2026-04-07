@@ -161,70 +161,102 @@ async def profile_posts(req: ProfileRequest):
     if not username:
         raise HTTPException(status_code=400, detail="Username é obrigatório.")
 
-    # Use Instagram's public web API to fetch profile posts
-    url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "X-IG-App-ID": "936619743392459",
-        "X-Requested-With": "XMLHttpRequest",
-    }
+    # Use yt-dlp to scrape individual post info from a profile
+    # First try the graphql approach via yt-dlp with cookies workaround
+    profile_url = f"https://www.instagram.com/{username}/reels/"
 
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client_http:
-        try:
-            resp = await client_http.get(url, headers=headers)
-        except httpx.TimeoutException:
-            raise HTTPException(status_code=500, detail="Timeout ao buscar perfil.")
+    try:
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--flat-playlist",
+                "--dump-json",
+                "--playlist-end",
+                str(req.max_posts),
+                "--extractor-args",
+                "instagram:compatible_formats=dash",
+                profile_url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Timeout ao buscar perfil.")
 
-        if resp.status_code == 404:
-            raise HTTPException(status_code=404, detail="Perfil não encontrado.")
-        if resp.status_code != 200:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Erro ao buscar perfil (status {resp.status_code}).",
-            )
-
-        try:
-            data = resp.json()
-        except Exception:
-            raise HTTPException(status_code=500, detail="Resposta inválida do Instagram.")
-
-    user_data = data.get("data", {}).get("user")
-    if not user_data:
-        raise HTTPException(status_code=404, detail="Perfil não encontrado ou privado.")
-
-    edges = (
-        user_data.get("edge_owner_to_timeline_media", {}).get("edges", [])
-    )
-
+    # If yt-dlp fails, try scraping the page HTML for shortcodes
     posts = []
-    for edge in edges[: req.max_posts]:
-        node = edge.get("node", {})
-        # Only include video posts (reels/videos)
-        if not node.get("is_video", False):
-            continue
 
-        shortcode = node.get("shortcode", "")
-        timestamp = node.get("taken_at_timestamp")
-        date_str = None
-        if timestamp:
-            from datetime import datetime, timezone
-            dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-            date_str = dt.strftime("%d/%m/%Y")
+    if result.stdout.strip():
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                info = json.loads(line)
+                raw_date = info.get("upload_date")
+                post_id = info.get("id", "")
+                posts.append({
+                    "id": post_id,
+                    "url": info.get("url") or info.get("webpage_url") or f"https://www.instagram.com/reel/{post_id}/",
+                    "title": info.get("title", ""),
+                    "description": info.get("description", ""),
+                    "thumbnail": info.get("thumbnail") or (info.get("thumbnails", [{}]) or [{}])[-1].get("url"),
+                    "likes": info.get("like_count"),
+                    "comments": info.get("comment_count"),
+                    "views": info.get("view_count"),
+                    "date": (
+                        f"{raw_date[6:8]}/{raw_date[4:6]}/{raw_date[:4]}"
+                        if raw_date
+                        else None
+                    ),
+                })
+            except json.JSONDecodeError:
+                continue
 
-        caption_edges = node.get("edge_media_to_caption", {}).get("edges", [])
-        caption = caption_edges[0]["node"]["text"] if caption_edges else ""
+    # Fallback: scrape shortcodes from HTML page
+    if not posts:
+        import re
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as http:
+            try:
+                resp = await http.get(
+                    f"https://www.instagram.com/{username}/",
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+                    },
+                )
+                if resp.status_code == 200:
+                    # Extract shortcodes from the HTML
+                    shortcodes = re.findall(r'/reel/([A-Za-z0-9_-]+)/', resp.text)
+                    # Also try /p/ pattern
+                    shortcodes += re.findall(r'/p/([A-Za-z0-9_-]+)/', resp.text)
+                    # Deduplicate while preserving order
+                    seen = set()
+                    unique_codes = []
+                    for sc in shortcodes:
+                        if sc not in seen:
+                            seen.add(sc)
+                            unique_codes.append(sc)
 
-        posts.append({
-            "id": shortcode,
-            "url": f"https://www.instagram.com/reel/{shortcode}/",
-            "title": "",
-            "description": caption,
-            "thumbnail": node.get("thumbnail_src") or node.get("display_url"),
-            "likes": node.get("edge_media_preview_like", {}).get("count"),
-            "comments": node.get("edge_media_to_comment", {}).get("count"),
-            "views": node.get("video_view_count"),
-            "date": date_str,
-        })
+                    for sc in unique_codes[: req.max_posts]:
+                        posts.append({
+                            "id": sc,
+                            "url": f"https://www.instagram.com/reel/{sc}/",
+                            "title": "",
+                            "description": "",
+                            "thumbnail": None,
+                            "likes": None,
+                            "comments": None,
+                            "views": None,
+                            "date": None,
+                        })
+            except Exception:
+                pass
+
+    if not posts:
+        raise HTTPException(
+            status_code=500,
+            detail="Não foi possível buscar posts. O perfil pode ser privado ou o Instagram bloqueou a requisição.",
+        )
 
     return {"username": username, "posts": posts}
 
