@@ -25,13 +25,13 @@ DEFAULT_ACCOUNTS = [
     "cleiton_siqueira1",
     "marcodosuldomundo",
     "tessarisc",
-    "carolineformigoni.sc",
+    "carolformigoni.sc",
     "correasc14",
     "edupercio",
     "precandidatonilsonvicenti",
     "vagner.visoli",
     "margarethpratts",
-    "paulojosue14",
+    "paulojosuesc",
     "rodrigues_coronel",
     "santiagocesarsc",
     "rafaeldemarco.sc",
@@ -51,6 +51,7 @@ DEFAULT_ACCOUNTS = [
     "lucasilvasc",
     "fiscalizatijucas",
     "larissakamers",
+    "olucasfsilveira",
 ]
 
 app = FastAPI()
