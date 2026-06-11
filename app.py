@@ -366,6 +366,23 @@ def compute_metrics(conn: sqlite3.Connection, username: str) -> dict:
     max_likes = max((p["like_count"] or 0 for p in recent), default=None)
     max_views = max((p["view_count"] or 0 for p in recent), default=None)
 
+    # Produção semanal: soma do que foi publicado nos últimos 28 dias ÷ 4.
+    # Junta alcance e constância — quem posta um viral por trimestre não
+    # pontua mais do que quem entrega views toda semana. Sem posts na
+    # janela = 0 (não postar derruba o desempenho de propósito).
+    window_posts = [p for p in posts if p["taken_at"] >= now - 28 * 86400]
+    if posts:
+        weekly_likes = round(sum(p["like_count"] or 0 for p in window_posts) / 4, 1)
+        if window_posts and not any(p["view_count"] for p in window_posts):
+            weekly_views = None  # postou, mas só fotos — não dá para medir views
+        else:
+            weekly_views = round(sum(p["view_count"] or 0 for p in window_posts) / 4, 1)
+    else:
+        weekly_likes = weekly_views = None
+    weekly_views_per_follower = (
+        round(weekly_views / followers, 3) if followers and weekly_views is not None else None
+    )
+
     engagement_pct = None
     views_per_follower = None
     if followers:
@@ -387,6 +404,10 @@ def compute_metrics(conn: sqlite3.Connection, username: str) -> dict:
         "max_views": max_views,
         "engagement_pct": engagement_pct,
         "views_per_follower": views_per_follower,
+        "weekly_likes": weekly_likes,
+        "weekly_views": weekly_views,
+        "weekly_views_per_follower": weekly_views_per_follower,
+        "posts_last_28d": len(window_posts),
         "weekly_growth_abs": growth_abs,
         "weekly_growth_pct": growth_pct,
         "growth_window_days": growth_window_days,
